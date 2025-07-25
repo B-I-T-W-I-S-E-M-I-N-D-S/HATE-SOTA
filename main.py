@@ -27,24 +27,19 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
     epoch_cost = 0
     epoch_cost_cls = 0
     epoch_cost_reg = 0
-    epoch_cost_snip = 0
     
     total_iter = len(train_dataset)//opt['batch_size']
     cls_loss = MultiCrossEntropyLoss(focal=True)
-    snip_loss = MultiCrossEntropyLoss(focal=True)
-    for n_iter,(input_data,cls_label,reg_label,snip_label) in enumerate(tqdm(train_loader)):
+    
+    for n_iter,(input_data,cls_label,reg_label,_) in enumerate(tqdm(train_loader)):
 
         if warmup:
             for g in optimizer.param_groups:
                 g['lr'] = n_iter * (opt['lr']) / total_iter
         
-        # act_cls, act_reg, snip_cls = model(input_data.cuda())
-        act_cls, act_reg, snip_cls = model(input_data.float().cuda())
+        act_cls, act_reg = model(input_data.float().cuda())
 
-
-        
         act_cls.register_hook(partial(cls_loss.collect_grad, cls_label))
-        snip_cls.register_hook(partial(snip_loss.collect_grad, snip_label))
         
         cost_reg = 0
         cost_cls = 0
@@ -57,14 +52,8 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
         loss = regress_loss_func(reg_label,act_reg)
         cost_reg = loss  
         epoch_cost_reg += cost_reg.detach().cpu().numpy()   
-
-        loss = cls_loss_func_(snip_loss, snip_label,snip_cls)
-        cost_snip = loss
-
-            
-        epoch_cost_snip+= cost_snip.detach().cpu().numpy() 
         
-        cost= opt['alpha']*cost_cls +opt['beta']*cost_reg + opt['gamma']*cost_snip    
+        cost= opt['alpha']*cost_cls +opt['beta']*cost_reg    
                 
         epoch_cost += cost.detach().cpu().numpy() 
 
@@ -72,7 +61,7 @@ def train_one_epoch(opt, model, train_dataset, optimizer, warmup=False):
         cost.backward()
         optimizer.step()   
                 
-    return n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_snip
+    return n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg
 
 def eval_one_epoch(opt, model, test_dataset):
     cls_loss, reg_loss, tot_loss, output_cls, output_reg, labels_cls, labels_reg, working_time, total_frames = eval_frame(opt, model,test_dataset)
@@ -93,9 +82,7 @@ def train(opt):
     writer = SummaryWriter()
     model = MYNET(opt).cuda()
     
-    rest_of_model_params = [param for name, param in model.named_parameters() if "history_unit" not in name]
-  
-    optimizer = optim.Adam([{'params': model.history_unit.parameters(), 'lr': 1e-6}, {'params': rest_of_model_params}],lr=opt["lr"],weight_decay = opt["weight_decay"])  
+    optimizer = optim.Adam(model.parameters(), lr=opt["lr"], weight_decay=opt["weight_decay"])  
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer,step_size = opt["lr_step"])
     
     train_dataset = VideoDataSet(opt,subset="train")      
@@ -107,14 +94,13 @@ def train(opt):
         if n_epoch >=1:
             warmup=False
         
-        n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg, epoch_cost_snip = train_one_epoch(opt, model, train_dataset, optimizer, warmup)
+        n_iter, epoch_cost, epoch_cost_cls, epoch_cost_reg = train_one_epoch(opt, model, train_dataset, optimizer, warmup)
             
         writer.add_scalars('data/cost', {'train': epoch_cost/(n_iter+1)}, n_epoch)
-        print("training loss(epoch %d): %.03f, cls - %f, reg - %f, snip - %f, lr - %f"%(n_epoch,
+        print("training loss(epoch %d): %.03f, cls - %f, reg - %f, lr - %f"%(n_epoch,
                                                                             epoch_cost/(n_iter+1),
                                                                             epoch_cost_cls/(n_iter+1),
                                                                             epoch_cost_reg/(n_iter+1),
-                                                                            epoch_cost_snip/(n_iter+1),
                                                                             optimizer.param_groups[-1]["lr"]) )
         
         scheduler.step()
@@ -159,8 +145,7 @@ def eval_frame(opt, model, dataset):
     epoch_cost_reg = 0   
     
     for n_iter,(input_data,cls_label,reg_label, _) in enumerate(tqdm(test_loader)):
-        # act_cls, act_reg, _ = model(input_data.cuda())
-        act_cls, act_reg, _ = model(input_data.float().cuda())
+        act_cls, act_reg = model(input_data.float().cuda())
         cost_reg = 0
         cost_cls = 0
         
@@ -445,7 +430,7 @@ def test_online(opt):
             input_queue[-1:,:]=dataset._get_base_data(video_name,idx,idx+1)
             
             minput = input_queue.unsqueeze(0)
-            act_cls, act_reg, _ = model(minput.cuda())
+            act_cls, act_reg = model(minput.cuda())
             act_cls = torch.softmax(act_cls, dim=-1)
             
             cls_anc = act_cls.squeeze(0).detach().cpu().numpy()
